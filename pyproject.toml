@@ -1,0 +1,67 @@
+[project]
+name = "rise-marketing-agent"
+version = "0.1.0"
+description = "RISE Tech Village — Social Media Poster Design Agent with HITL Gate"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    # Web framework
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    # Database — async SQLAlchemy + PostgreSQL driver
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",          # async PostgreSQL driver (fastest)
+    "psycopg2-binary>=2.9.10",  # sync driver for Alembic migrations only
+    # Database migrations
+    "alembic>=1.14.0",
+    # Settings & environment
+    "pydantic-settings>=2.6.0",
+    "pydantic>=2.10.0",
+    "python-dotenv>=1.0.1",
+    # Security
+    "python-jose[cryptography]>=3.3.0",  # JWT validation (Supabase tokens)
+    "passlib[bcrypt]>=1.7.4",
+    "cryptography>=43.0.0",
+    # LangGraph + LangChain
+    "langgraph>=0.2.60",
+    "langchain>=0.3.10",
+    "langchain-anthropic>=0.3.0",
+    "langgraph-checkpoint-postgres>=2.0.0",  # PostgreSQL checkpointer for HITL
+    # LangSmith observability
+    "langsmith>=0.2.0",
+    # Image generation
+    "openai>=1.57.0",           # DALL-E 3 fallback
+    # stability-sdk removed (gRPC, requires MSVC on Windows) — use REST API via httpx instead
+    # AWS S3 storage
+    "boto3>=1.35.0",
+    "aioboto3>=13.2.0",         # async S3 operations
+    # Notifications
+    "slack-sdk>=3.33.0",
+    "httpx>=0.28.0",            # async HTTP for platform APIs
+    # Utilities
+    "Pillow>=11.0.0",           # image resizing for platform variants
+    "python-multipart>=0.0.12", # file uploads
+    "tenacity>=9.0.0",          # retry logic for platform API calls
+    "structlog>=24.4.0",        # structured logging
+    "apscheduler>=3.11.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "httpx>=0.28.0",            # TestClient
+    "factory-boy>=3.3.1",       # test fixtures
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
