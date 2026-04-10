@@ -15,7 +15,7 @@ Routes:
 from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import cast, Float, func, select
+from sqlalchemy import case, cast, Float, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import UserPayload, get_db, require_staff
@@ -122,10 +122,9 @@ async def get_quality_analytics(
             func.avg(cast(PosterReview.score_cultural, Float)).label("avg_cultural"),
             func.count(PosterReview.id).label("total_reviews"),
             func.sum(
-                # Count 1 for each approved review, 0 for others
-                func.cast(
-                    PosterReview.decision == ReviewDecision.APPROVED,
-                    Float,
+                case(
+                    (PosterReview.decision == ReviewDecision.APPROVED, literal(1)),
+                    else_=literal(0),
                 )
             ).label("approved_count"),
         )

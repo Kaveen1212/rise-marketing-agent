@@ -2,9 +2,13 @@ from langchain_anthropic import ChatAnthropic
 from langgraph.prebuilt import create_react_agent
 from app.graph.state import PosterState
 from app.tools.brand_tools import validate_brand_guidelines, classify_audience_segment
-import json
+from app.config import settings
+from app.agents._parse_json import extract_json
 
-_llm = ChatAnthropic(model="claude-sonnet-4-6")
+_llm = ChatAnthropic(
+    model=settings.ANTHROPIC_MODEL,
+    api_key=settings.ANTHROPIC_API_KEY.get_secret_value(),
+)
 _tools = [validate_brand_guidelines, classify_audience_segment]
 _agent = create_react_agent(_llm, _tools)
 
@@ -36,7 +40,7 @@ def brief_parser_agent(state: PosterState) -> dict:
             }
         ]
     })
-    parsed = json.loads(result["messages"][-1].content)
+    parsed = extract_json(result["messages"][-1].content)
     return {
         "audience_segment": parsed["audience_segment"],
         "tone": parsed["tone"],

@@ -2,9 +2,13 @@ from langchain_anthropic import ChatAnthropic
 from langgraph.prebuilt import create_react_agent
 from app.graph.state import PosterState
 from app.tools.design_tools import call_stability_ai, call_dalle3, resize_for_platform, select_layout_template
-import json
+from app.config import settings
+from app.agents._parse_json import extract_json
 
-_llm = ChatAnthropic(model="claude-sonnet-4-6")
+_llm = ChatAnthropic(
+    model=settings.ANTHROPIC_MODEL,
+    api_key=settings.ANTHROPIC_API_KEY.get_secret_value(),
+)
 _tools = [call_stability_ai, call_dalle3, resize_for_platform, select_layout_template]
 _agent = create_react_agent(_llm, _tools)
 
@@ -35,8 +39,8 @@ def designer_agent(state: PosterState) -> dict:
                 
                 Steps:
                 1. Call select_layout_template to choose the best template
-                2. Call call_stability_ai with the image prompt (try this first — cheaper)
-                3. If Stability AI fails or produces poor output, call call_dalle3 instead
+                2. Call call_stability_ai with the image prompt (primary)
+                3. If Stability AI fails or produces poor output, call call_dalle3 (alternate style preset)
                 4. For each platform in the brief, call resize_for_platform
                 
                 Return ONLY this JSON:
@@ -59,7 +63,7 @@ def designer_agent(state: PosterState) -> dict:
             }
         ]
     })
-    parsed = json.loads(result["messages"][-1].content)
+    parsed = extract_json(result["messages"][-1].content)
     return {
         "image_url":       parsed["image_url"],
         "design_manifest": parsed["design_manifest"],

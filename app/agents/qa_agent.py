@@ -10,11 +10,16 @@ from app.tools.qa_tools import (
     validate_dimensions,
     score_text_rendering,
 )
-import json
+from app.agents._parse_json import extract_json
 
+
+from app.config import settings
 
 # The LLM this agent uses
-_llm = ChatAnthropic(model="claude-sonnet-4-6")
+_llm = ChatAnthropic(
+    model=settings.ANTHROPIC_MODEL,
+    api_key=settings.ANTHROPIC_API_KEY.get_secret_value(),
+)
 
 # The tools this agent has access to
 _tools = [
@@ -86,7 +91,7 @@ def qa_agent(state: PosterState) -> dict:
             }
         ]
     })
-    parsed = json.loads(result["messages"][-1].content)
+    parsed = extract_json(result["messages"][-1].content)
     return {
         "qa_report":     parsed["qa_report"],
         "qa_confidence": parsed["qa_confidence"],

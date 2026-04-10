@@ -145,7 +145,12 @@ class PosterBrief(Base):
 
     # ── Pipeline state ───────────────────────────────────────────────────────
     status: Mapped[PosterStatus] = mapped_column(
-        Enum(PosterStatus, name="poster_status_enum", create_type=True),
+        Enum(
+            PosterStatus,
+            name="poster_status_enum",
+            create_type=False,
+            values_callable=lambda x: [e.value for e in x],
+        ),
         nullable=False,
         default=PosterStatus.GENERATING,
         index=True,

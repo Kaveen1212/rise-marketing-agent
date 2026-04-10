@@ -103,7 +103,12 @@ class PosterPublication(Base):
 
     # ── Status ────────────────────────────────────────────────────────────────
     status: Mapped[PublicationStatus] = mapped_column(
-        Enum(PublicationStatus, name="publication_status_enum", create_type=True),
+        Enum(
+            PublicationStatus,
+            name="publication_status_enum",
+            create_type=False,
+            values_callable=lambda x: [e.value for e in x],
+        ),
         nullable=False,
         default=PublicationStatus.SCHEDULED,
         index=True,

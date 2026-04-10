@@ -136,9 +136,19 @@ app.add_middleware(
 # Import routers here once they are implemented.
 # They are commented out now so the app still starts while stubs are empty.
 
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+
 from app.api.analytics import router as analytics_router
 from app.api.briefs    import router as briefs_router
 from app.api.review    import router as review_router
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Local storage — serve poster images from disk in development
+# ─────────────────────────────────────────────────────────────────────────────
+storage_path = Path("storage")
+storage_path.mkdir(parents=True, exist_ok=True)
+app.mount("/storage", StaticFiles(directory=str(storage_path)), name="storage")
 
 app.include_router(briefs_router,    prefix="/poster", tags=["Briefs"])
 app.include_router(review_router,    prefix="/poster", tags=["Review"])

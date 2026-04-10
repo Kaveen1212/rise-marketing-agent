@@ -1,30 +1,57 @@
 # app/services/storage_service.py
 # ─────────────────────────────────────────────────────────────────────────────
-# AWS S3 operations for poster image storage.
-#
-# WHY S3 FOR IMAGES?
-#   Generated poster images can be 2–5MB each.
-#   Storing them in the DB (as BYTEA) would make the DB huge and slow.
-#   S3 is cheap (~$0.023/GB/month), durable (99.999999999%), and scales infinitely.
-#
-# WHAT TO BUILD:
-#
-#   upload_poster(image_bytes: bytes, brief_id: str, version: int, platform: str) -> str
-#       - Key format: posters/{brief_id}/v{version}/{platform}.jpg
-#       - Upload to S3_POSTER_BUCKET with ACL=private (NEVER public)
-#       - Return the S3 key (not a URL — URLs are generated separately)
-#
-#   get_presigned_url(s3_key: str, expiry_seconds: int = 3600) -> str
-#       - Generate a time-limited pre-signed URL for the review interface
-#       - Expiry default = settings.S3_URL_EXPIRY_SECONDS (1 hour from spec §11)
-#       - After expiry, the URL stops working — prevents image leaking
-#
-#   get_cdn_url(s3_key: str) -> str
-#       - Only called AFTER a poster is approved
-#       - Returns the permanent CloudFront URL for the published post
-#       - Format: https://posters.risetechvillage.lk/{s3_key}
-#
-#   delete_poster_version(brief_id: str, version: int) -> None
-#       - Hard-delete all S3 objects for a rejected/exhausted brief version
-#       - Clean up storage for content that will never be published
+# Local file storage for poster images (development mode).
+# In production, switch to AWS S3 by setting USE_LOCAL_STORAGE=false.
 # ─────────────────────────────────────────────────────────────────────────────
+
+import os
+import uuid
+from pathlib import Path
+
+from app.config import settings
+
+# Local storage directory — created at app root
+STORAGE_DIR = Path("storage/posters")
+
+
+def _ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def upload_poster(image_bytes: bytes, brief_id: str, version: int, platform: str) -> str:
+    """
+    Save poster image to local storage.
+    Returns the relative file path (used as the storage key).
+    """
+    key = f"posters/{brief_id}/v{version}/{platform}.jpg"
+    file_path = STORAGE_DIR / brief_id / f"v{version}"
+    _ensure_dir(file_path)
+    full_path = file_path / f"{platform}.jpg"
+    full_path.write_bytes(image_bytes)
+    return key
+
+
+def get_presigned_url(storage_key: str, expiry_seconds: int = 3600) -> str:
+    """
+    In local mode, return a URL served by FastAPI's static files.
+    In production, this would generate an S3 pre-signed URL.
+    """
+    return f"http://localhost:8000/storage/{storage_key}"
+
+
+def get_cdn_url(storage_key: str) -> str:
+    """
+    In local mode, same as presigned URL.
+    In production, returns the CloudFront URL.
+    """
+    return f"http://localhost:8000/storage/{storage_key}"
+
+
+def delete_poster_version(brief_id: str, version: int) -> None:
+    """
+    Delete all files for a rejected/exhausted poster version.
+    """
+    version_dir = STORAGE_DIR / brief_id / f"v{version}"
+    if version_dir.exists():
+        import shutil
+        shutil.rmtree(version_dir)

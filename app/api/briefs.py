@@ -121,6 +121,17 @@ async def submit_brief(
     # It runs until interrupt_before=["human_review"] fires and pauses
     await pipeline_service.start_pipeline(str(brief.id), initial_state)
 
+    # Pipeline has paused at HITL gate — update status to pending_review
+    brief.status = PosterStatus.PENDING_REVIEW
+    await db.flush()
+
+    # Notify reviewers that a poster is ready — non-fatal if it fails
+    try:
+        from app.services.notification_service import notify_pending_review
+        await notify_pending_review(brief)
+    except Exception as exc:
+        log.warning("pending_review_notification_failed", error=str(exc))
+
     return BriefSubmitResponse(
         brief_id=brief.id,
         thread_id=brief.thread_id,

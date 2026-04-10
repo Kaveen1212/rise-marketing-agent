@@ -101,7 +101,12 @@ class PosterReview(Base):
 
     # ── Decision ──────────────────────────────────────────────────────────────
     decision: Mapped[ReviewDecision] = mapped_column(
-        Enum(ReviewDecision, name="review_decision_enum", create_type=True),
+        Enum(
+            ReviewDecision,
+            name="review_decision_enum",
+            create_type=False,
+            values_callable=lambda x: [e.value for e in x],
+        ),
         nullable=False,
         index=True,
         comment="Review outcome: approved / revision / rejected",
