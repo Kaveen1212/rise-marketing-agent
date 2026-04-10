@@ -159,6 +159,13 @@ async def approve_poster(
 
     await pipeline_service.resume_pipeline(brief.thread_id, state_update)
 
+    # Notify the team — non-fatal if it fails
+    try:
+        from app.services.notification_service import notify_approved
+        await notify_approved(brief)
+    except Exception as exc:
+        log.warning("approval_notification_failed", error=str(exc))
+
     # Build scheduled_at preview from config defaults for the response
     from app.services.publish_service import calculate_publish_time
     scheduled_at = {

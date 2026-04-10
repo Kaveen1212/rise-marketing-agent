@@ -182,13 +182,22 @@ class Settings(BaseSettings):
     @property
     def async_database_url(self) -> str:
         """
-        Returns the async DB URL with sslmode=require appended.
+        Returns the async DB URL with ssl=require for asyncpg.
+        asyncpg uses 'ssl' not 'sslmode' (which is psycopg/libpq).
         SSL is mandatory — we never connect to PostgreSQL unencrypted.
         """
         url = self.DATABASE_URL.get_secret_value()
-        if "sslmode" not in url:
+        # asyncpg does not understand sslmode — convert to ssl
+        if "sslmode=" in url:
+            url = url.replace("sslmode=require", "ssl=require")
+            url = url.replace("sslmode=prefer", "ssl=require")
+        elif "ssl=" not in url:
             separator = "&" if "?" in url else "?"
             url = f"{url}{separator}ssl=require"
+        # Remove channel_binding if present — asyncpg doesn't support it
+        if "channel_binding=" in url:
+            import re
+            url = re.sub(r"[&?]channel_binding=[^&]*", "", url)
         return url
 
     @property

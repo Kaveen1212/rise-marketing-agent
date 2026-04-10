@@ -27,9 +27,9 @@ import app.models  # noqa: F401 — side-effect import registers all models
 # Alembic Config object (provides access to values in alembic.ini)
 config = context.config
 
-# ── Inject the database URL from environment (not from alembic.ini) ──────────
-# settings.sync_database_url always includes sslmode=require
-config.set_main_option("sqlalchemy.url", settings.sync_database_url)
+# ── Database URL is read from settings, not alembic.ini ──────────────────────
+# We avoid config.set_main_option because configparser chokes on % in passwords.
+# The URL is passed directly to create_engine in run_migrations_online().
 
 # Set up Python logging from the alembic.ini [loggers] section
 if config.config_file_name is not None:
@@ -55,9 +55,8 @@ def run_migrations_offline() -> None:
         alembic upgrade head --sql > migration.sql
         # Review migration.sql, then apply manually
     """
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=settings.sync_database_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -87,7 +86,7 @@ def run_migrations_online() -> None:
     connectable = create_engine(
         settings.sync_database_url,
         poolclass=pool.NullPool,
-        connect_args={"channel_binding": "prefer", "connect_timeout": 15},
+        connect_args={"connect_timeout": 15},
     )
 
     with connectable.connect() as connection:

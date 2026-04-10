@@ -2,9 +2,13 @@ from langchain_anthropic import ChatAnthropic
 from langgraph.prebuilt import create_react_agent
 from app.graph.state import PosterState
 from app.tools.copy_tools import validate_character_limits, check_cultural_tone, generate_hashtags
-import json
+from app.config import settings
+from app.agents._parse_json import extract_json
 
-_llm = ChatAnthropic(model="claude-sonnet-4-6")
+_llm = ChatAnthropic(
+    model=settings.ANTHROPIC_MODEL,
+    api_key=settings.ANTHROPIC_API_KEY.get_secret_value(),
+)
 _tools = [validate_character_limits, check_cultural_tone, generate_hashtags]
 _agent = create_react_agent(_llm, _tools)
 
@@ -47,7 +51,7 @@ def copywriter_agent(state: PosterState) -> dict:
             }
         ]
     })
-    parsed = json.loads(result["messages"][-1].content)
+    parsed = extract_json(result["messages"][-1].content)
     return {
         "headline":     parsed["headline"],
         "body_copy":    parsed["body_copy"],

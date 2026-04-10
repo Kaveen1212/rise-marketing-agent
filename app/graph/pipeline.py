@@ -9,24 +9,57 @@ from app.agents.qa_agent import qa_agent
 from app.agents.publisher import publisher_agent
 from app.config import settings
 
+import psycopg
+import structlog
+
+log = structlog.get_logger()
+
+
+def _get_checkpointer_url() -> str:
+    """
+    Convert the SQLAlchemy-style URL to a plain PostgreSQL URL for psycopg.
+    PostgresSaver uses psycopg (v3) which expects postgresql://
+    """
+    url = settings.LANGGRAPH_CHECKPOINTER_URL.get_secret_value()
+    url = url.replace("postgresql+psycopg2://", "postgresql://")
+    url = url.replace("postgresql+asyncpg://", "postgresql://")
+    return url
+
+
+# Module-level persistent connection for the checkpointer
+_conn: psycopg.Connection | None = None
+_graph = None
+
+
+def _get_connection() -> psycopg.Connection:
+    """Get or create a persistent psycopg v3 connection."""
+    global _conn
+    if _conn is None or _conn.closed:
+        conn_string = _get_checkpointer_url()
+        _conn = psycopg.connect(conn_string, autocommit=True)
+    return _conn
+
+
 def build_graph():
+    """Build the compiled graph with PostgreSQL checkpointer (sync)."""
+    global _graph
+    if _graph is not None:
+        return _graph
+
     builder = StateGraph(PosterState)
 
-    # Add every agent as a node
     builder.add_node("brief_parser", brief_parser_agent)
     builder.add_node("copywriter",   copywriter_agent)
     builder.add_node("designer",     designer_agent)
     builder.add_node("qa_agent",     qa_agent)
-    builder.add_node("human_review", lambda s: s)  # pause point — does nothing
+    builder.add_node("human_review", lambda s: s)
     builder.add_node("publisher",    publisher_agent)
 
-    # Fixed sequence
     builder.set_entry_point("brief_parser")
     builder.add_edge("brief_parser", "copywriter")
     builder.add_edge("copywriter",   "designer")
     builder.add_edge("designer",     "qa_agent")
 
-    # Conditional routing
     builder.add_conditional_edges("qa_agent", route_after_qa, {
         "regenerate":   "designer",
         "human_review": "human_review",
@@ -38,12 +71,17 @@ def build_graph():
     })
     builder.add_edge("publisher", END)
 
-    # PostgreSQL checkpointer — saves state across the interrupt pause
-    checkpointer = PostgresSaver.from_conn_string(
-        settings.LANGGRAPH_CHECKPOINTER_URL.get_secret_value()
-    )
+    conn = _get_connection()
+    checkpointer = PostgresSaver(conn)
 
-    return builder.compile(
+    try:
+        checkpointer.setup()
+        log.info("langgraph_checkpointer_ready")
+    except Exception as exc:
+        log.warning("checkpointer_setup_warning", error=str(exc))
+
+    _graph = builder.compile(
         checkpointer=checkpointer,
-        interrupt_before=["human_review"]  # ← this IS the HITL gate
+        interrupt_before=["human_review"]
     )
+    return _graph

@@ -285,6 +285,7 @@ async def collect_due_analytics() -> None:
 async def _call_platform_api(pub: PosterPublication) -> str:
     """
     Route to the correct platform publish tool based on pub.platform.
+    Loads the poster version to get copy and hashtags for the caption.
     Returns the external_post_id string from the platform.
     """
     from app.tools.publish_tools import (
@@ -296,28 +297,46 @@ async def _call_platform_api(pub: PosterPublication) -> str:
 
     image_url = await _resolve_image_url(pub)
 
+    # Load version data for caption text
+    caption = ""
+    hashtags = []
+    async with AsyncSessionLocal() as db:
+        from app.models.version import PosterVersion
+        from app.models.brief import PosterBrief
+        version = await db.get(PosterVersion, pub.version_id)
+        brief = await db.get(PosterBrief, pub.brief_id)
+        if version:
+            lang = pub.language
+            headline = version.headline.get(lang, "")
+            body = version.body_copy.get(lang, "")
+            cta = version.cta.get(lang, "")
+            platform_hashtags = version.hashtags.get(pub.platform, [])
+            hashtag_str = " ".join(f"#{h}" for h in platform_hashtags) if platform_hashtags else ""
+            caption = f"{headline}\n\n{body}\n\n{cta}\n\n{hashtag_str}".strip()
+            hashtags = platform_hashtags if platform_hashtags else []
+
     if pub.platform == "instagram":
         return post_to_instagram.invoke({
             "image_url": image_url,
-            "caption": "",
-            "hashtags": [],
+            "caption": caption,
+            "hashtags": hashtags,
         })
     elif pub.platform == "facebook":
         return post_to_facebook.invoke({
             "image_url": image_url,
-            "message": "",
+            "message": caption,
             "page_id": settings.FACEBOOK_PAGE_ID,
         })
     elif pub.platform == "linkedin":
         return post_to_linkedin.invoke({
             "image_url": image_url,
-            "text": "",
+            "text": caption,
             "org_id": settings.LINKEDIN_ORG_ID,
         })
     elif pub.platform == "tiktok":
         return post_to_tiktok.invoke({
             "video_url": image_url,
-            "caption": "",
+            "caption": caption,
         })
     else:
         raise ValueError(f"Unknown platform: {pub.platform}")

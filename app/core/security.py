@@ -21,7 +21,7 @@ Roles (from spec §5.1):
 from dataclasses import dataclass
 from uuid import UUID
 
-from fastapi import HTTPException, status
+from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import ExpiredSignatureError, JWTError, jwt
 
@@ -113,42 +113,41 @@ def decode_jwt(token: str) -> UserPayload:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# require_role — factory that returns a FastAPI dependency
+# RoleChecker — class-based dependency for role-based access control
 # ─────────────────────────────────────────────────────────────────────────────
 
-def require_role(*allowed_roles: str):
+class RoleChecker:
     """
-    Returns a FastAPI dependency that:
-      1. Extracts the Bearer token from Authorization header
-      2. Decodes and verifies it
-      3. Checks the user's role is in allowed_roles
-      4. Returns the UserPayload if authorised
-      5. Raises 403 Forbidden if the role is not permitted
+    Class-based FastAPI dependency for role-based access control.
 
     Usage in routes:
         @router.post("/approve")
-        async def approve(user: UserPayload = Depends(require_role("reviewer", "admin"))):
+        async def approve(user: UserPayload = Depends(require_reviewer)):
             ...
 
     Args:
-        *allowed_roles: One or more role strings that can access the route
+        allowed_roles: Roles that can access the route (admin is always added)
     """
-    # admin always has access regardless of which roles are listed
-    effective_roles = set(allowed_roles) | {"admin"}
 
-    async def _dependency(token: str = oauth2_scheme) -> UserPayload:  # type: ignore[return]
+    def __init__(self, *allowed_roles: str):
+        self.allowed_roles = set(allowed_roles) | {"admin"}
+
+    async def __call__(self, token: str = Depends(oauth2_scheme)) -> UserPayload:
         user = decode_jwt(token)
-        if user.role not in effective_roles:
+        if user.role not in self.allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
-                    f"Access denied. Required role: {list(allowed_roles)}. "
+                    f"Access denied. Required role: {list(self.allowed_roles)}. "
                     f"Your role: {user.role}"
                 ),
             )
         return user
 
-    return _dependency
+
+# Keep the factory function for backwards compatibility
+def require_role(*allowed_roles: str) -> RoleChecker:
+    return RoleChecker(*allowed_roles)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -156,10 +155,10 @@ def require_role(*allowed_roles: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Any authenticated user — just needs a valid token
-require_any_user = require_role("staff", "marketing", "reviewer", "admin")
+require_any_user = RoleChecker("staff", "marketing", "reviewer", "admin")
 
 # Can submit briefs
-require_staff = require_role("staff", "marketing", "reviewer", "admin")
+require_staff = RoleChecker("staff", "marketing", "reviewer", "admin")
 
 # Can approve / revise / reject posters — the HITL gate role check
-require_reviewer = require_role("reviewer", "admin")
+require_reviewer = RoleChecker("reviewer", "admin")

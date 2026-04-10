@@ -36,36 +36,28 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
 
-    # ── ENUM types ────────────────────────────────────────────────────────────
-    poster_status_enum = postgresql.ENUM(
-        "generating",
-        "qa_check",
-        "pending_review",
-        "in_revision",
-        "approved",
-        "scheduled",
-        "published",
-        "rejected",
-        "exhausted",
-        name="poster_status_enum",
-    )
-    poster_status_enum.create(op.get_bind(), checkfirst=True)
-
-    review_decision_enum = postgresql.ENUM(
-        "approved",
-        "revision",
-        "rejected",
-        name="review_decision_enum",
-    )
-    review_decision_enum.create(op.get_bind(), checkfirst=True)
-
-    publication_status_enum = postgresql.ENUM(
-        "scheduled",
-        "published",
-        "failed",
-        name="publication_status_enum",
-    )
-    publication_status_enum.create(op.get_bind(), checkfirst=True)
+    # ── ENUM types (check existence before creating — PG < 16 has no IF NOT EXISTS for TYPE)
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'poster_status_enum') THEN
+                CREATE TYPE poster_status_enum AS ENUM ('generating', 'qa_check', 'pending_review', 'in_revision', 'approved', 'scheduled', 'published', 'rejected', 'exhausted');
+            END IF;
+        END $$;
+    """)
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'review_decision_enum') THEN
+                CREATE TYPE review_decision_enum AS ENUM ('approved', 'revision', 'rejected');
+            END IF;
+        END $$;
+    """)
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'publication_status_enum') THEN
+                CREATE TYPE publication_status_enum AS ENUM ('scheduled', 'published', 'failed');
+            END IF;
+        END $$;
+    """)
 
     # ── poster_briefs ─────────────────────────────────────────────────────────
     op.create_table(
@@ -99,11 +91,11 @@ def upgrade() -> None:
         sa.Column("brand_notes",      sa.Text(),      nullable=True),
         sa.Column(
             "status",
-            sa.Enum(
+            postgresql.ENUM(
                 "generating", "qa_check", "pending_review", "in_revision",
                 "approved", "scheduled", "published", "rejected", "exhausted",
                 name="poster_status_enum",
-                create_type=False,  # already created above
+                create_type=False,
             ),
             nullable=False,
             server_default="generating",
@@ -220,7 +212,7 @@ def upgrade() -> None:
         ),
         sa.Column(
             "decision",
-            sa.Enum(
+            postgresql.ENUM(
                 "approved", "revision", "rejected",
                 name="review_decision_enum",
                 create_type=False,
@@ -295,7 +287,7 @@ def upgrade() -> None:
         sa.Column("published_at",     sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "status",
-            sa.Enum(
+            postgresql.ENUM(
                 "scheduled", "published", "failed",
                 name="publication_status_enum",
                 create_type=False,
