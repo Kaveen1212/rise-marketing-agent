@@ -55,11 +55,15 @@ async def lifespan(app: FastAPI):
     log.info("rise_poster_agent_starting", version=settings.APP_VERSION, env=settings.APP_ENV)
 
     # 1. Verify the database is reachable before accepting any traffic.
-    #    If the DB is down, the app refuses to start rather than serving errors.
+    #    Retries handle cloud DB cold-starts (e.g. Neon auto-suspend).
+    #    In development, a failed check is a warning only; in production it
+    #    refuses to start to prevent serving errors with no DB behind it.
     db_ok = await check_database_connection()
     if not db_ok:
         log.error("startup_failed_db_unreachable")
-        raise RuntimeError("Database unreachable at startup — refusing to start.")
+        if settings.APP_ENV == "production":
+            raise RuntimeError("Database unreachable at startup — refusing to start.")
+        log.warning("continuing_without_db_dev_mode_only")
 
     log.info("database_connection_verified")
 
@@ -121,7 +125,7 @@ app.add_middleware(
     # "https://review.risetechvillage.lk" in production
     allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],   # only what the spec needs
+    allow_methods=["GET", "POST", "PUT", "DELETE"],   # chat + images also need these
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -142,6 +146,8 @@ from fastapi.staticfiles import StaticFiles
 from app.api.analytics import router as analytics_router
 from app.api.briefs    import router as briefs_router
 from app.api.review    import router as review_router
+from app.api.chat      import router as chat_router
+from app.api.images    import router as images_router
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Local storage — serve poster images from disk in development
@@ -153,6 +159,8 @@ app.mount("/storage", StaticFiles(directory=str(storage_path)), name="storage")
 app.include_router(briefs_router,    prefix="/poster", tags=["Briefs"])
 app.include_router(review_router,    prefix="/poster", tags=["Review"])
 app.include_router(analytics_router, prefix="/poster", tags=["Analytics"])
+app.include_router(chat_router,      prefix="/poster", tags=["Chat"])
+app.include_router(images_router,    prefix="/poster", tags=["Images"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
