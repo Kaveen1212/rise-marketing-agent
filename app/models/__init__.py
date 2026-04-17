@@ -12,6 +12,8 @@ from app.models.brief import PosterBrief, PosterStatus  # noqa: F401
 from app.models.version import PosterVersion             # noqa: F401
 from app.models.review import PosterReview, ReviewDecision  # noqa: F401
 from app.models.publication import PosterPublication, PublicationStatus  # noqa: F401
+from app.models.image import PosterImage, ImageSource  # noqa: F401
+from app.models.chat import ChatSession, ChatMessage  # noqa: F401
 
 __all__ = [
     "PosterBrief",
@@ -21,4 +23,8 @@ __all__ = [
     "ReviewDecision",
     "PosterPublication",
     "PublicationStatus",
+    "PosterImage",
+    "ImageSource",
+    "ChatSession",
+    "ChatMessage",
 ]

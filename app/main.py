@@ -117,12 +117,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    # Origins come from config: e.g. "http://localhost:3000" in dev,
-    # "https://review.risetechvillage.lk" in production
-    allow_origins=settings.cors_origins_list,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],   # only what the spec needs
-    allow_headers=["Authorization", "Content-Type"],
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -141,6 +139,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.analytics import router as analytics_router
 from app.api.briefs    import router as briefs_router
+from app.api.chat      import router as chat_router
+from app.api.images    import router as images_router
 from app.api.review    import router as review_router
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -153,6 +153,8 @@ app.mount("/storage", StaticFiles(directory=str(storage_path)), name="storage")
 app.include_router(briefs_router,    prefix="/poster", tags=["Briefs"])
 app.include_router(review_router,    prefix="/poster", tags=["Review"])
 app.include_router(analytics_router, prefix="/poster", tags=["Analytics"])
+app.include_router(chat_router,      prefix="/poster", tags=["Chat"])
+app.include_router(images_router,    prefix="/poster", tags=["Images"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
