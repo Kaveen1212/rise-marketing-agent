@@ -1,190 +1,433 @@
 """
 app/api/images.py
 ─────────────────────────────────────────────────────────────────────────────
-Image gallery endpoints for the Next.js review UI.
+Image management API — upload, approve, reject, and list images.
 
 Routes:
-  POST   /poster/images/upload               → upload a file
-  GET    /poster/images/uploads              → list uploaded images
-  DELETE /poster/images/uploads/{id}         → delete an uploaded image
-  GET    /poster/images/approved             → list approved images
-  GET    /poster/images/pending              → list pending (generated) images
-  POST   /poster/images/{id}/approve         → approve image + optional schedule
-  POST   /poster/images/{id}/reject          → reject image
+  POST   /poster/images/upload           → upload your own image
+  GET    /poster/images/uploads          → list uploaded images
+  DELETE /poster/images/uploads/{id}     → delete an uploaded image
+  GET    /poster/images/approved         → list approved images
+  GET    /poster/images/pending          → list generated (pending review) images
+  POST   /poster/images/{id}/approve     → approve image → save to approved folder
+  POST   /poster/images/{id}/reject      → reject image → remove from storage
 ─────────────────────────────────────────────────────────────────────────────
 """
 
-from uuid import UUID
+import base64
+import shutil
+import uuid
+from datetime import datetime
+from io import BytesIO
+from pathlib import Path
+from typing import Optional
 
 import structlog
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.api.deps import get_db
-from app.models.image import ImageSource, PosterImage
-from app.schemas.image import (
-    ApproveImageRequest,
-    ApproveImageResponse,
-    DeleteImageResponse,
-    ImageInfo,
-    RejectImageResponse,
-)
-from app.services import image_service
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
 
 log = structlog.get_logger()
-
 router = APIRouter()
 
+STORAGE_DIR = Path(__file__).parent.parent.parent / "storage" / "posters"
+UPLOADS_DIR = STORAGE_DIR / "uploads"
+APPROVED_DIR = STORAGE_DIR / "approved"
+GENERATED_DIR = STORAGE_DIR / "generated"
+REJECTED_DIR = STORAGE_DIR / "rejected"
 
-def _request_base(request: Request) -> str:
-    # Honor reverse-proxy / tunnel headers so HTTPS Vercel clients get HTTPS
-    # URLs back (no mixed-content warnings). Falls back to the raw request URL
-    # when headers are absent (e.g. local development).
-    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
-    return f"{proto}://{host}"
+# Ensure directories exist
+for d in [UPLOADS_DIR, APPROVED_DIR, GENERATED_DIR, REJECTED_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
 
-
-def _to_info(image: PosterImage, request_base: str) -> ImageInfo:
-    # Ensure URL is absolute for the current host
-    url = image.url
-    if url.startswith("/"):
-        url = f"{request_base}{url}"
-    return ImageInfo(
-        image_id=str(image.id),
-        url=url,
-        filename=image.filename,
-        created_at=image.created_at,
-        size_bytes=image.size_bytes,
-        source=image.source.value,
-        platform=image.platform,
-        caption=image.caption,
-        scheduled_time=image.scheduled_time,
-    )
-
-
-async def _list_by_source(
-    db: AsyncSession, source: ImageSource, request_base: str
-) -> list[ImageInfo]:
-    result = await db.execute(
-        select(PosterImage)
-        .where(PosterImage.source == source)
-        .order_by(PosterImage.created_at.desc())
-    )
-    return [_to_info(img, request_base) for img in result.scalars().all()]
+ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Upload
+# Response schemas
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ImageInfo(BaseModel):
+    image_id: str
+    url: str
+    filename: str
+    created_at: str
+    size_bytes: int
+    source: str  # "upload" | "generated" | "approved"
+    platform: Optional[str] = None
+    caption: Optional[str] = None
+    scheduled_time: Optional[str] = None
+
+
+class ApproveImageRequest(BaseModel):
+    caption: Optional[str] = None
+    platforms: Optional[list[str]] = None
+    scheduled_time: Optional[str] = None  # ISO string or human-readable
+
+
+class ApproveImageResponse(BaseModel):
+    image_id: str
+    approved_url: str
+    message: str
+    scheduled_time: Optional[str] = None
+
+
+class RejectImageResponse(BaseModel):
+    image_id: str
+    message: str
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _detect_mime_type(data: bytes) -> str:
+    """Detect MIME type from magic bytes."""
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "application/octet-stream"
+
+
+def _file_to_data_uri(path: Path) -> str:
+    """Read an image file and return as a base64 data URI."""
+    data = path.read_bytes()
+    _mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}
+    mime = _mime_map.get(path.suffix.lower(), "image/jpeg")
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+
+
+def _validate_image_id(image_id: str) -> None:
+    if "/" in image_id or "\\" in image_id or ".." in image_id:
+        raise HTTPException(status_code=400, detail="Invalid image ID.")
+
+
+def _find_image(image_id: str) -> Optional[tuple[Path, str]]:
+    """
+    Find an image by ID in uploads, generated, or approved directories.
+    Returns (file_path, source) or None.
+    """
+    for source, directory in [
+        ("upload", UPLOADS_DIR),
+        ("generated", GENERATED_DIR),
+        ("approved", APPROVED_DIR),
+    ]:
+        # Direct file
+        for ext in (".jpg", ".jpeg", ".png", ".webp"):
+            path = directory / f"{image_id}{ext}"
+            if path.exists():
+                return path, source
+        # Subdirectory (approved images stored per brief_id)
+        for subdir in directory.iterdir():
+            if subdir.is_dir():
+                for ext in (".jpg", ".jpeg", ".png", ".webp"):
+                    path = subdir / f"{image_id}{ext}"
+                    if path.exists():
+                        return path, source
+
+    return None
+
+
+def _list_images_in_dir(directory: Path, source: str) -> list[ImageInfo]:
+    """List all images in a directory as ImageInfo objects."""
+    images = []
+    if not directory.exists():
+        return images
+
+    for f in sorted(directory.rglob("*.jpg"), key=lambda p: p.stat().st_mtime, reverse=True):
+        image_id = f.stem
+        stat = f.stat()
+        url = _file_to_data_uri(f)
+        images.append(ImageInfo(
+            image_id=image_id,
+            url=url,
+            filename=f.name,
+            created_at=datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            size_bytes=stat.st_size,
+            source=source,
+        ))
+
+    return images
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /poster/images/upload — upload your own image
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/images/upload", response_model=ImageInfo)
 async def upload_image(
-    request: Request,
     file: UploadFile = File(...),
-    caption: str | None = Form(default=None),
-    db: AsyncSession = Depends(get_db),
+    caption: Optional[str] = Form(None),
 ):
-    try:
-        image = await image_service.save_upload(
-            db=db,
-            file=file,
-            caption=caption,
-            request_base=_request_base(request),
+    """
+    Upload your own image to use in social media posts.
+
+    Accepts JPEG, PNG, WebP. Max 10MB.
+    Returns the image URL for use in posts.
+    """
+    # Read file
+    data = await file.read()
+
+    if len(data) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 10MB.")
+
+    # Validate MIME type
+    mime = _detect_mime_type(data)
+    if mime not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type. Allowed: JPEG, PNG, WebP, GIF."
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return _to_info(image, _request_base(request))
+
+    # Save as JPEG for consistency
+    try:
+        from PIL import Image
+        img = Image.open(BytesIO(data))
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+
+        image_id = uuid.uuid4().hex[:12]
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        file_path = UPLOADS_DIR / f"{image_id}.jpg"
+
+        out = BytesIO()
+        img.save(out, "JPEG", quality=92)
+        file_path.write_bytes(out.getvalue())
+
+    except Exception as e:
+        log.error("image_upload_failed", error=str(e))
+        raise HTTPException(status_code=422, detail="Failed to process image file.")
+
+    stat = file_path.stat()
+    log.info("image_uploaded", image_id=image_id, size=stat.st_size)
+
+    return ImageInfo(
+        image_id=image_id,
+        url=_file_to_data_uri(file_path),
+        filename=f"{image_id}.jpg",
+        created_at=datetime.now().isoformat(),
+        size_bytes=stat.st_size,
+        source="upload",
+        caption=caption,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# List galleries
+# GET /poster/images/uploads — list uploaded images
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/images/uploads", response_model=list[ImageInfo])
-async def list_uploaded(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-):
-    return await _list_by_source(db, ImageSource.UPLOAD, _request_base(request))
+async def list_uploads():
+    """List all images you have uploaded."""
+    return _list_images_in_dir(UPLOADS_DIR, "upload")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DELETE /poster/images/uploads/{image_id} — delete an upload
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.delete("/images/uploads/{image_id}")
+async def delete_upload(image_id: str):
+    """Delete an uploaded image."""
+    _validate_image_id(image_id)
+    result = _find_image(image_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Image not found.")
+
+    file_path, source = result
+    if source != "upload":
+        raise HTTPException(status_code=400, detail="Only uploaded images can be deleted this way.")
+
+    file_path.unlink()
+    log.info("upload_deleted", image_id=image_id)
+    return {"message": "Image deleted.", "image_id": image_id}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /poster/images/approved — list approved images
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/images/approved", response_model=list[ImageInfo])
-async def list_approved(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-):
-    return await _list_by_source(db, ImageSource.APPROVED, _request_base(request))
+async def list_approved():
+    """List all approved images saved to the approved folder."""
+    images = []
+    if not APPROVED_DIR.exists():
+        return images
 
+    # Walk subdirectories (organized by brief_id or flat)
+    for f in sorted(APPROVED_DIR.rglob("*.jpg"), key=lambda p: p.stat().st_mtime, reverse=True):
+        stat = f.stat()
+        url = _file_to_data_uri(f)
+
+        # Try to read caption from sidecar file
+        caption_file = f.with_suffix(".txt")
+        caption = caption_file.read_text(encoding="utf-8") if caption_file.exists() else None
+
+        # Try to read schedule from sidecar
+        schedule_file = f.parent / "schedule.txt"
+        scheduled_time = schedule_file.read_text(encoding="utf-8") if schedule_file.exists() else None
+
+        # Determine platform from filename or parent folder name
+        platform = None
+        parent_name = f.parent.name
+        if parent_name in ("instagram", "facebook", "linkedin", "tiktok"):
+            platform = parent_name
+
+        images.append(ImageInfo(
+            image_id=f.stem,
+            url=url,
+            filename=f.name,
+            created_at=datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            size_bytes=stat.st_size,
+            source="approved",
+            platform=platform,
+            caption=caption,
+            scheduled_time=scheduled_time,
+        ))
+
+    return images
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /poster/images/pending — list pending (generated, not yet reviewed) images
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/images/pending", response_model=list[ImageInfo])
-async def list_pending(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-):
-    return await _list_by_source(db, ImageSource.GENERATED, _request_base(request))
+async def list_pending():
+    """List all AI-generated images waiting for approval."""
+    return _list_images_in_dir(GENERATED_DIR, "generated")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Delete
-# ─────────────────────────────────────────────────────────────────────────────
-
-@router.delete("/images/uploads/{image_id}", response_model=DeleteImageResponse)
-async def delete_uploaded(
-    image_id: UUID,
-    db: AsyncSession = Depends(get_db),
-):
-    image = await db.get(PosterImage, image_id)
-    if image is None:
-        raise HTTPException(status_code=404, detail="Image not found")
-    if image.source != ImageSource.UPLOAD:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Only uploaded images can be deleted here (source={image.source.value})",
-        )
-    await image_service.delete_image(db, image)
-    return DeleteImageResponse(message="Image deleted")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Approve / Reject
+# POST /poster/images/{image_id}/approve — approve an image
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/images/{image_id}/approve", response_model=ApproveImageResponse)
-async def approve_image(
-    image_id: UUID,
-    request: Request,
-    body: ApproveImageRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    image = await db.get(PosterImage, image_id)
-    if image is None:
-        raise HTTPException(status_code=404, detail="Image not found")
+async def approve_image(image_id: str, body: ApproveImageRequest = ApproveImageRequest()):
+    """
+    Approve an image — saves it to the approved folder.
 
-    updated = await image_service.approve_image(
-        db=db,
-        image=image,
-        caption=body.caption,
-        platforms=body.platforms,
-        scheduled_time=body.scheduled_time,
-        request_base=_request_base(request),
-    )
+    The image is organized under storage/posters/approved/
+    Optional caption and scheduled time are saved as sidecar files.
+    """
+    _validate_image_id(image_id)
+    result = _find_image(image_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Image not found.")
+
+    file_path, source = result
+
+    if source == "approved":
+        # Already approved
+        return ApproveImageResponse(
+            image_id=image_id,
+            approved_url=_file_to_data_uri(file_path),
+            message="Image was already approved.",
+        )
+
+    # Create approved directory for this image
+    approved_subdir = APPROVED_DIR / image_id
+    approved_subdir.mkdir(parents=True, exist_ok=True)
+
+    # Copy image to approved folder
+    approved_path = approved_subdir / f"{image_id}.jpg"
+    shutil.copy2(file_path, approved_path)
+
+    # Save caption sidecar
+    if body.caption:
+        (approved_subdir / f"{image_id}.txt").write_text(body.caption, encoding="utf-8")
+
+    # Determine scheduled time
+    scheduled_time = body.scheduled_time
+    if not scheduled_time and body.platforms:
+        from app.agents.scheduling_agent import get_suggested_post_time
+        scheduled_time = get_suggested_post_time(
+            platform=body.platforms[0] if body.platforms else "instagram"
+        )
+
+    if scheduled_time:
+        (approved_subdir / "schedule.txt").write_text(scheduled_time, encoding="utf-8")
+
+    # Save platforms info
+    if body.platforms:
+        (approved_subdir / "platforms.txt").write_text(
+            ",".join(body.platforms), encoding="utf-8"
+        )
+
+    # Delete original from generated (if it was generated)
+    if source == "generated":
+        try:
+            file_path.unlink()
+        except Exception:
+            pass
+
+    approved_url = _file_to_data_uri(approved_path)
+
+    log.info("image_approved", image_id=image_id, scheduled_time=scheduled_time)
+
     return ApproveImageResponse(
-        image_id=str(updated.id),
-        approved_url=updated.url,
-        message="Image approved",
-        scheduled_time=updated.scheduled_time,
+        image_id=image_id,
+        approved_url=approved_url,
+        message="Image approved and saved to your folder!",
+        scheduled_time=scheduled_time,
     )
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /poster/images/{image_id}/reject — reject an image
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/images/{image_id}/reject", response_model=RejectImageResponse)
-async def reject_image(
-    image_id: UUID,
-    db: AsyncSession = Depends(get_db),
-):
-    image = await db.get(PosterImage, image_id)
-    if image is None:
-        raise HTTPException(status_code=404, detail="Image not found")
-    await image_service.reject_image(db, image)
-    return RejectImageResponse(image_id=str(image.id), message="Image rejected")
+async def reject_image(image_id: str):
+    """
+    Reject an image — removes it from storage.
+    Uploaded images are not deleted; only AI-generated ones.
+    """
+    _validate_image_id(image_id)
+    result = _find_image(image_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Image not found.")
+
+    file_path, source = result
+
+    if source == "upload":
+        # Don't delete uploads — just acknowledge
+        return RejectImageResponse(
+            image_id=image_id,
+            message="Generated image rejected. Your uploaded image remains in your library.",
+        )
+
+    if source == "approved":
+        # Move back to rejected
+        rejected_subdir = REJECTED_DIR / image_id
+        rejected_subdir.mkdir(parents=True, exist_ok=True)
+
+        # Move the whole approved subfolder
+        parent_dir = file_path.parent
+        if parent_dir != APPROVED_DIR:
+            shutil.move(str(parent_dir), str(rejected_subdir))
+        else:
+            shutil.move(str(file_path), str(rejected_subdir / f"{image_id}.jpg"))
+
+        log.info("approved_image_rejected", image_id=image_id)
+        return RejectImageResponse(
+            image_id=image_id,
+            message="Image removed from approved folder.",
+        )
+
+    # Generated image — delete it
+    try:
+        file_path.unlink()
+        log.info("generated_image_rejected", image_id=image_id)
+    except Exception as e:
+        log.warning("delete_failed", image_id=image_id, error=str(e))
+
+    return RejectImageResponse(
+        image_id=image_id,
+        message="Image rejected and removed.",
+    )

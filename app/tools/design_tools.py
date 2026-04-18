@@ -1,10 +1,50 @@
-from langchain_core.tools import tool
-from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
-import uuid
+import base64
 import io
+import uuid
+from pathlib import Path
 
-STORAGE_DIR = Path("storage/posters")
+import httpx
+from langchain_core.tools import tool
+from PIL import Image, ImageDraw, ImageFont
+
+STORAGE_DIR = Path(__file__).parent.parent.parent / "storage" / "posters"
+LOGO_PATH = STORAGE_DIR / "logos" / "RiseLogo.png"
+
+
+def _to_data_uri(file_path: Path) -> str:
+    return f"data:image/jpeg;base64,{base64.b64encode(file_path.read_bytes()).decode()}"
+
+
+def _overlay_logo(image_bytes: bytes) -> bytes:
+    """Composite the RISE eagle logo onto the top-left corner of a poster image."""
+    if not LOGO_PATH.exists():
+        return image_bytes
+
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    w, h = img.size
+
+    logo = Image.open(LOGO_PATH).convert("RGBA")
+
+    # Make the black background transparent (threshold < 30 on all channels)
+    pixels = logo.load()
+    for y in range(logo.height):
+        for x in range(logo.width):
+            r, g, b, a = pixels[x, y]
+            if r < 30 and g < 30 and b < 30:
+                pixels[x, y] = (r, g, b, 0)
+
+    # Scale logo to 14% of poster width, preserving aspect ratio
+    logo_w = max(60, int(w * 0.14))
+    logo_h = int(logo.height * (logo_w / logo.width))
+    logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
+
+    # Paste at top-left with 2% padding
+    pad = max(10, int(w * 0.02))
+    img.paste(logo, (pad, pad), logo)
+
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, "JPEG", quality=90)
+    return buf.getvalue()
 
 
 def _generate_placeholder(prompt: str, width: int, height: int) -> bytes:
@@ -36,7 +76,7 @@ def _generate_placeholder(prompt: str, width: int, height: int) -> bytes:
 
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=90)
-    return buf.getvalue()
+    return _overlay_logo(buf.getvalue())
 
 
 def _clamp_sdxl_dimensions(width: int, height: int) -> tuple[int, int]:
@@ -55,7 +95,6 @@ def call_stability_ai(prompt: str, negative_prompt: str, width: int, height: int
     Falls back to a branded placeholder if the API call fails.
     Returns the local URL of the generated image.
     """
-    import httpx, base64
     from app.config import settings
 
     image_id = uuid.uuid4().hex[:12]
@@ -67,7 +106,7 @@ def call_stability_ai(prompt: str, negative_prompt: str, width: int, height: int
     if not api_key:
         # No API key — use placeholder
         file_path.write_bytes(_generate_placeholder(prompt, 1024, 1024))
-        return f"http://localhost:8000/storage/posters/generated/{image_id}.jpg"
+        return _to_data_uri(file_path)
 
     w, h = _clamp_sdxl_dimensions(width, height)
 
@@ -86,7 +125,7 @@ def call_stability_ai(prompt: str, negative_prompt: str, width: int, height: int
         )
         response.raise_for_status()
         image_b64 = response.json()["artifacts"][0]["base64"]
-        file_path.write_bytes(base64.b64decode(image_b64))
+        file_path.write_bytes(_overlay_logo(base64.b64decode(image_b64)))
     except Exception:
         # Fallback: retry with safe 1024x1024
         try:
@@ -101,22 +140,21 @@ def call_stability_ai(prompt: str, negative_prompt: str, width: int, height: int
             )
             response.raise_for_status()
             image_b64 = response.json()["artifacts"][0]["base64"]
-            file_path.write_bytes(base64.b64decode(image_b64))
+            file_path.write_bytes(_overlay_logo(base64.b64decode(image_b64)))
         except Exception:
             # Final fallback: branded placeholder
             file_path.write_bytes(_generate_placeholder(prompt, 1024, 1024))
 
-    return f"http://localhost:8000/storage/posters/generated/{image_id}.jpg"
+    return _to_data_uri(file_path)
 
 
 @tool
-def call_dalle3(prompt: str) -> str:
+def call_stability_creative(prompt: str) -> str:
     """
-    Fallback image generation using Stability AI with a different style preset.
+    Fallback image generation using Stability AI with a digital-art style preset.
     Falls back to placeholder if API fails.
     Returns the local URL of the generated image.
     """
-    import httpx, base64
     from app.config import settings
 
     image_id = uuid.uuid4().hex[:12]
@@ -127,7 +165,7 @@ def call_dalle3(prompt: str) -> str:
     api_key = settings.STABILITY_AI_API_KEY
     if not api_key:
         file_path.write_bytes(_generate_placeholder(prompt, 1024, 1024))
-        return f"http://localhost:8000/storage/posters/generated/{image_id}.jpg"
+        return _to_data_uri(file_path)
 
     try:
         response = httpx.post(
@@ -142,11 +180,11 @@ def call_dalle3(prompt: str) -> str:
         )
         response.raise_for_status()
         image_b64 = response.json()["artifacts"][0]["base64"]
-        file_path.write_bytes(base64.b64decode(image_b64))
+        file_path.write_bytes(_overlay_logo(base64.b64decode(image_b64)))
     except Exception:
         file_path.write_bytes(_generate_placeholder(prompt, 1024, 1024))
 
-    return f"http://localhost:8000/storage/posters/generated/{image_id}.jpg"
+    return _to_data_uri(file_path)
 
 
 @tool
@@ -166,9 +204,12 @@ def resize_for_platform(image_url: str, platform: str) -> str:
     }
     width, height = dimensions.get(platform, (1080, 1080))
 
-    # Download the source image
+    # Load source image from data URI or URL
     try:
-        if image_url.startswith("http://localhost"):
+        if image_url.startswith("data:"):
+            _, encoded = image_url.split(",", 1)
+            image_bytes = base64.b64decode(encoded)
+        elif image_url.startswith("http://localhost"):
             local_path = Path(image_url.replace("http://localhost:8000/storage/", "storage/"))
             image_bytes = local_path.read_bytes()
         else:
@@ -189,7 +230,7 @@ def resize_for_platform(image_url: str, platform: str) -> str:
     file_path = save_dir / f"{image_id}.jpg"
     img.save(file_path, "JPEG", quality=90)
 
-    return f"http://localhost:8000/storage/posters/platforms/{platform}/{image_id}.jpg"
+    return _to_data_uri(file_path)
 
 
 @tool
