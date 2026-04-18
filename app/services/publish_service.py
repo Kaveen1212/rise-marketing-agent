@@ -171,46 +171,52 @@ async def publish_due_posts() -> None:
     """
     now_utc = datetime.now(timezone.utc)
 
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(PosterPublication).where(
-                and_(
-                    PosterPublication.status == PublicationStatus.SCHEDULED,
-                    PosterPublication.scheduled_at <= now_utc,
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(PosterPublication).where(
+                    and_(
+                        PosterPublication.status == PublicationStatus.SCHEDULED,
+                        PosterPublication.scheduled_at <= now_utc,
+                    )
                 )
             )
-        )
-        due_posts = result.scalars().all()
+            due_posts = result.scalars().all()
 
-        if not due_posts:
-            return
+            if not due_posts:
+                return
 
-        log.info("publish_job_running", due_count=len(due_posts))
+            log.info("publish_job_running", due_count=len(due_posts))
 
-        for pub in due_posts:
-            try:
-                post_id = await _call_platform_api(pub)
-                pub.external_post_id = post_id
-                pub.status = PublicationStatus.PUBLISHED
-                pub.published_at = datetime.now(timezone.utc)
+            for pub in due_posts:
+                try:
+                    post_id = await _call_platform_api(pub)
+                    pub.external_post_id = post_id
+                    pub.status = PublicationStatus.PUBLISHED
+                    pub.published_at = datetime.now(timezone.utc)
 
-                log.info(
-                    "post_published",
-                    publication_id=str(pub.id),
-                    platform=pub.platform,
-                    external_post_id=post_id,
-                )
+                    log.info(
+                        "post_published",
+                        publication_id=str(pub.id),
+                        platform=pub.platform,
+                        external_post_id=post_id,
+                    )
 
-            except Exception as exc:
-                pub.status = PublicationStatus.FAILED
-                log.error(
-                    "post_publish_failed",
-                    publication_id=str(pub.id),
-                    platform=pub.platform,
-                    error=str(exc),
-                )
+                except Exception as exc:
+                    pub.status = PublicationStatus.FAILED
+                    log.error(
+                        "post_publish_failed",
+                        publication_id=str(pub.id),
+                        platform=pub.platform,
+                        error=str(exc),
+                    )
 
-        await db.commit()
+            await db.commit()
+
+    except OSError as exc:
+        log.warning("publish_job_skipped_db_unavailable", error=str(exc))
+    except Exception as exc:
+        log.error("publish_job_error", error=str(exc))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -233,49 +239,54 @@ async def collect_due_analytics() -> None:
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
 
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(PosterPublication).where(
-                and_(
-                    PosterPublication.status == PublicationStatus.PUBLISHED,
-                    PosterPublication.analytics_fetched_at.is_(None),
-                    PosterPublication.published_at <= cutoff,
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(PosterPublication).where(
+                    and_(
+                        PosterPublication.status == PublicationStatus.PUBLISHED,
+                        PosterPublication.analytics_fetched_at.is_(None),
+                        PosterPublication.published_at <= cutoff,
+                    )
                 )
             )
-        )
-        due_analytics = result.scalars().all()
+            due_analytics = result.scalars().all()
 
-        if not due_analytics:
-            return
+            if not due_analytics:
+                return
 
-        log.info("analytics_job_running", due_count=len(due_analytics))
+            log.info("analytics_job_running", due_count=len(due_analytics))
 
-        for pub in due_analytics:
-            try:
-                stats = await _fetch_platform_analytics(pub)
-                pub.reach_24h = stats.get("reach", 0)
-                pub.engagements_24h = stats.get("engagements", 0)
-                pub.followers_gained_24h = stats.get("followers_gained", 0)
-                pub.analytics_fetched_at = datetime.now(timezone.utc)
+            for pub in due_analytics:
+                try:
+                    stats = await _fetch_platform_analytics(pub)
+                    pub.reach_24h = stats.get("reach", 0)
+                    pub.engagements_24h = stats.get("engagements", 0)
+                    pub.followers_gained_24h = stats.get("followers_gained", 0)
+                    pub.analytics_fetched_at = datetime.now(timezone.utc)
 
-                log.info(
-                    "analytics_collected",
-                    publication_id=str(pub.id),
-                    platform=pub.platform,
-                    reach=pub.reach_24h,
-                    engagements=pub.engagements_24h,
-                )
+                    log.info(
+                        "analytics_collected",
+                        publication_id=str(pub.id),
+                        platform=pub.platform,
+                        reach=pub.reach_24h,
+                        engagements=pub.engagements_24h,
+                    )
 
-            except Exception as exc:
-                # Non-fatal — will retry on next 5-minute tick
-                log.warning(
-                    "analytics_fetch_failed",
-                    publication_id=str(pub.id),
-                    platform=pub.platform,
-                    error=str(exc),
-                )
+                except Exception as exc:
+                    log.warning(
+                        "analytics_fetch_failed",
+                        publication_id=str(pub.id),
+                        platform=pub.platform,
+                        error=str(exc),
+                    )
 
-        await db.commit()
+            await db.commit()
+
+    except OSError as exc:
+        log.warning("analytics_job_skipped_db_unavailable", error=str(exc))
+    except Exception as exc:
+        log.error("analytics_job_error", error=str(exc))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -13,6 +13,8 @@ Routes:
 ─────────────────────────────────────────────────────────────────────────────
 """
 
+import base64
+import json
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -27,11 +29,73 @@ from app.config import settings
 log = structlog.get_logger()
 router = APIRouter()
 
-# ── In-memory conversation store (per-session, expires with server restart) ──
-# In production: replace with Redis or Supabase table
-_conversations: dict[str, list[dict]] = {}
+STORAGE_DIR = Path(__file__).parent.parent.parent / "storage" / "posters"
+SESSIONS_DIR = Path(__file__).parent.parent.parent / "storage" / "chat_sessions"
+SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
-STORAGE_DIR = Path("storage/posters")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# File-based session persistence
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _session_path(session_id: str) -> Path:
+    return SESSIONS_DIR / f"{session_id}.json"
+
+
+def _save_session(session_id: str, messages: list[dict], brief: Optional[dict] = None, status: str = "chat") -> None:
+    path = _session_path(session_id)
+    existing: dict = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    title = existing.get("title") or next(
+        (m["content"][:60] for m in messages if m.get("role") == "user"), "New Chat"
+    )
+
+    path.write_text(json.dumps({
+        "session_id": session_id,
+        "title": title,
+        "created_at": existing.get("created_at", datetime.now().isoformat()),
+        "updated_at": datetime.now().isoformat(),
+        "status": status,
+        "brief": brief or existing.get("brief"),
+        "messages": messages,
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def _load_session(session_id: str) -> Optional[dict]:
+    path = _session_path(session_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _load_messages(session_id: str) -> list[dict]:
+    data = _load_session(session_id)
+    return data.get("messages", []) if data else []
+
+
+def _image_id_to_data_uri(image_id: str) -> Optional[str]:
+    """Find a saved image by ID and return as base64 data URI."""
+    search_dirs = [
+        STORAGE_DIR / "generated",
+        STORAGE_DIR / "approved" / image_id,
+        STORAGE_DIR / "uploads",
+    ]
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        for ext in (".jpg", ".jpeg", ".png"):
+            p = directory / f"{image_id}{ext}"
+            if p.exists():
+                return f"data:image/jpeg;base64,{base64.b64encode(p.read_bytes()).decode()}"
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -67,20 +131,28 @@ class ChatResponse(BaseModel):
 def _build_system_prompt() -> str:
     return """You are RISE Marketing Agent — an AI assistant for RISE Tech Village Sri Lanka's social media marketing team.
 
-Your job is to help the marketing team create compelling social media content.
+Your job is to generate marketing images and social media content for ANY topic the user requests.
+You MUST always attempt to generate an image — never refuse or redirect.
 
-When a user sends you a message:
-1. Understand what they want to create (event post, course promotion, announcement, etc.)
-2. Extract the key details: topic, target audience, tone, platforms, key message
-3. If you have enough info to generate content, respond with JSON like:
-   {"status": "ready", "topic": "...", "audience": "...", "tone": "...", "platforms": ["instagram","facebook"], "key_message": "...", "image_prompt": "...", "caption": "..."}
-4. If you need more info, respond with JSON like:
-   {"status": "needs_clarification", "question": "What platforms should this be posted on?"}
-5. For general conversation, respond with JSON like:
+When a user sends you a message or an image generation prompt:
+1. If the user provides a detailed image prompt (e.g. describing a vehicle, product, scene, concept), use it directly as image_prompt — do NOT refuse it.
+2. Wrap the user's prompt with RISE Tech Village brand style: dark navy (#1A1A2E) environment, red accent (#E94560) lighting, professional marketing aesthetic.
+3. Always respond with JSON in one of these formats:
+
+   When ready to generate (always prefer this):
+   {"status": "ready", "topic": "...", "audience": "...", "tone": "professional", "platforms": ["instagram","facebook"], "key_message": "...", "image_prompt": "...", "caption": "..."}
+
+   Only if truly missing critical info:
+   {"status": "needs_clarification", "question": "..."}
+
+   For greetings or pure conversation only:
    {"status": "chat", "message": "..."}
 
-The image_prompt should be detailed and describe a professional marketing image for RISE Tech Village.
-RISE Tech Village brand colors: dark navy (#1A1A2E), red accent (#E94560), clean modern tech aesthetic.
+Rules:
+- If the user pastes an image prompt or describes a visual scene → status must be "ready", use their description as image_prompt.
+- The image_prompt field should be detailed, cinematic, and photorealistic.
+- RISE brand colors: dark navy (#1A1A2E), red accent (#E94560), clean modern tech aesthetic.
+- Never say you cannot generate images. Always set status to "ready" when given any visual description.
 
 Always respond with valid JSON only. No markdown, no extra text."""
 
@@ -133,7 +205,7 @@ def _generate_placeholder_image(prompt: str, platform: str) -> tuple[str, str]:
     try:
         from app.config import settings
         if settings.STABILITY_AI_API_KEY:
-            import httpx, base64
+            import httpx
 
             api_key = settings.STABILITY_AI_API_KEY.get_secret_value()
             w = max(512, min(1024, (width // 64) * 64))
@@ -157,8 +229,11 @@ def _generate_placeholder_image(prompt: str, platform: str) -> tuple[str, str]:
             save_dir = STORAGE_DIR / "generated"
             save_dir.mkdir(parents=True, exist_ok=True)
             file_path = save_dir / f"{image_id}.jpg"
+            from app.tools.design_tools import _overlay_logo
+            image_bytes = _overlay_logo(image_bytes)
             file_path.write_bytes(image_bytes)
-            return f"http://localhost:8000/storage/posters/generated/{image_id}.jpg", image_id
+            data_uri = f"data:image/jpeg;base64,{base64.b64encode(image_bytes).decode()}"
+            return data_uri, image_id
     except Exception as e:
         log.warning("stability_ai_failed", error=str(e))
 
@@ -205,14 +280,16 @@ def _generate_placeholder_image(prompt: str, platform: str) -> tuple[str, str]:
 
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=90)
+    image_bytes = buf.getvalue()
 
     image_id = uuid.uuid4().hex[:12]
     save_dir = STORAGE_DIR / "generated"
     save_dir.mkdir(parents=True, exist_ok=True)
     file_path = save_dir / f"{image_id}.jpg"
-    file_path.write_bytes(buf.getvalue())
+    file_path.write_bytes(image_bytes)
 
-    return f"http://localhost:8000/storage/posters/generated/{image_id}.jpg", image_id
+    data_uri = f"data:image/jpeg;base64,{base64.b64encode(image_bytes).decode()}"
+    return data_uri, image_id
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -234,15 +311,12 @@ async def send_message(body: ChatMessageRequest):
     """
     session_id = body.session_id or uuid.uuid4().hex
 
-    # Get or create conversation history
-    if session_id not in _conversations:
-        _conversations[session_id] = []
+    # Load persisted history and append the new user message
+    messages = _load_messages(session_id)
+    messages.append({"role": "user", "content": body.message, "timestamp": datetime.now().isoformat()})
 
-    # Add user message to history
-    _conversations[session_id].append({"role": "user", "content": body.message})
-
-    # Keep last 20 messages to avoid token limit
-    recent_messages = _conversations[session_id][-20:]
+    # Keep last 20 messages for Claude context (strip timestamps/image_id for API call)
+    recent_messages = [{"role": m["role"], "content": m["content"]} for m in messages[-20:]]
 
     log.info("chat_message_received", session_id=session_id, message_len=len(body.message))
 
@@ -261,14 +335,21 @@ async def send_message(body: ChatMessageRequest):
         platforms = ai_response.get("platforms", ["instagram"])
         primary_platform = platforms[0] if platforms else "instagram"
 
-        # Add a full descriptive context to the prompt
         topic = ai_response.get("topic", "marketing content")
-        full_prompt = (
-            f"Professional social media marketing image for RISE Tech Village Sri Lanka tech community. "
-            f"Topic: {topic}. {image_prompt}. "
-            f"Dark navy background (#1A1A2E), red accent color (#E94560), modern tech aesthetic, "
-            f"clean typography, professional quality."
-        )
+        # If user gave a detailed prompt, use it as-is; otherwise wrap with RISE context
+        if len(image_prompt) > 80:
+            full_prompt = (
+                f"{image_prompt}. "
+                f"RISE Tech Village Sri Lanka branding, dark navy (#1A1A2E) accent, red highlight (#E94560), "
+                f"professional marketing quality, photorealistic."
+            )
+        else:
+            full_prompt = (
+                f"Professional social media marketing image for RISE Tech Village Sri Lanka tech community. "
+                f"Topic: {topic}. {image_prompt}. "
+                f"Dark navy background (#1A1A2E), red accent color (#E94560), modern tech aesthetic, "
+                f"clean typography, professional quality."
+            )
 
         image_url, image_id = _generate_placeholder_image(full_prompt, primary_platform)
 
@@ -291,7 +372,22 @@ async def send_message(body: ChatMessageRequest):
             f"Review the image below and click **Approve** to save it to your folder, or **Reject** to try again."
         )
 
-        _conversations[session_id].append({"role": "assistant", "content": assistant_msg})
+        brief = {
+            "topic": ai_response.get("topic"),
+            "audience": ai_response.get("audience"),
+            "tone": ai_response.get("tone"),
+            "key_message": ai_response.get("key_message"),
+            "caption": caption,
+            "platforms": platforms,
+        }
+
+        messages.append({
+            "role": "assistant",
+            "content": assistant_msg,
+            "image_id": image_id,
+            "timestamp": datetime.now().isoformat(),
+        })
+        _save_session(session_id, messages, brief=brief, status="ready")
 
         return ChatResponse(
             session_id=session_id,
@@ -299,21 +395,15 @@ async def send_message(body: ChatMessageRequest):
             status="ready",
             image_url=image_url,
             image_id=image_id,
-            brief={
-                "topic": ai_response.get("topic"),
-                "audience": ai_response.get("audience"),
-                "tone": ai_response.get("tone"),
-                "key_message": ai_response.get("key_message"),
-                "caption": caption,
-                "platforms": platforms,
-            },
+            brief=brief,
             suggested_post_time=suggested_time,
             platforms=platforms,
         )
 
     elif status == "needs_clarification":
         question = ai_response.get("question", "Could you provide more details?")
-        _conversations[session_id].append({"role": "assistant", "content": question})
+        messages.append({"role": "assistant", "content": question, "timestamp": datetime.now().isoformat()})
+        _save_session(session_id, messages, status="needs_clarification")
         return ChatResponse(
             session_id=session_id,
             message=question,
@@ -323,7 +413,8 @@ async def send_message(body: ChatMessageRequest):
     else:
         # General chat
         message = ai_response.get("message", "How can I help you create content today?")
-        _conversations[session_id].append({"role": "assistant", "content": message})
+        messages.append({"role": "assistant", "content": message, "timestamp": datetime.now().isoformat()})
+        _save_session(session_id, messages, status="chat")
         return ChatResponse(
             session_id=session_id,
             message=message,
@@ -366,11 +457,65 @@ async def generate_image(body: GenerateImageRequest):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GET /poster/chat/sessions — list all sessions
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/chat/sessions")
+async def list_sessions():
+    """List all saved chat sessions, newest first."""
+    sessions = []
+    for f in sorted(SESSIONS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            sessions.append({
+                "session_id": data["session_id"],
+                "title": data.get("title", "Untitled"),
+                "status": data.get("status", "chat"),
+                "created_at": data.get("created_at", ""),
+                "updated_at": data.get("updated_at", ""),
+                "message_count": len(data.get("messages", [])),
+            })
+        except Exception:
+            pass
+    return {"sessions": sessions}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DELETE /poster/chat/sessions/{session_id} — delete a session
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.delete("/chat/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Delete a saved chat session."""
+    path = _session_path(session_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Session not found.")
+    path.unlink()
+    return {"message": "Session deleted.", "session_id": session_id}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GET /poster/chat/history/{session_id}
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/chat/history/{session_id}")
 async def get_history(session_id: str):
-    """Get the conversation history for a session."""
-    messages = _conversations.get(session_id, [])
-    return {"session_id": session_id, "messages": messages}
+    """Get the full conversation history for a session, with images as base64 data URIs."""
+    data = _load_session(session_id)
+    if not data:
+        return {"session_id": session_id, "messages": [], "brief": None}
+
+    enriched = []
+    for m in data.get("messages", []):
+        msg: dict = {"role": m["role"], "content": m["content"]}
+        if m.get("timestamp"):
+            msg["timestamp"] = m["timestamp"]
+        image_id = m.get("image_id")
+        if image_id:
+            msg["image_id"] = image_id
+            uri = _image_id_to_data_uri(image_id)
+            if uri:
+                msg["image_url"] = uri
+        enriched.append(msg)
+
+    return {"session_id": session_id, "messages": enriched, "brief": data.get("brief")}

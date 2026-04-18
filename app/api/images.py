@@ -14,6 +14,7 @@ Routes:
 ─────────────────────────────────────────────────────────────────────────────
 """
 
+import base64
 import shutil
 import uuid
 from datetime import datetime
@@ -93,6 +94,14 @@ def _detect_mime_type(data: bytes) -> str:
     return "application/octet-stream"
 
 
+def _file_to_data_uri(path: Path) -> str:
+    """Read an image file and return as a base64 data URI."""
+    data = path.read_bytes()
+    _mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}
+    mime = _mime_map.get(path.suffix.lower(), "image/jpeg")
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+
+
 def _find_image(image_id: str) -> Optional[tuple[Path, str]]:
     """
     Find an image by ID in uploads, generated, or approved directories.
@@ -128,8 +137,7 @@ def _list_images_in_dir(directory: Path, source: str) -> list[ImageInfo]:
     for f in sorted(directory.rglob("*.jpg"), key=lambda p: p.stat().st_mtime, reverse=True):
         image_id = f.stem
         stat = f.stat()
-        rel_path = f.relative_to(Path("storage"))
-        url = f"http://localhost:8000/storage/{rel_path.as_posix()}"
+        url = _file_to_data_uri(f)
         images.append(ImageInfo(
             image_id=image_id,
             url=url,
@@ -195,7 +203,7 @@ async def upload_image(
 
     return ImageInfo(
         image_id=image_id,
-        url=f"http://localhost:8000/storage/posters/uploads/{image_id}.jpg",
+        url=_file_to_data_uri(file_path),
         filename=f"{image_id}.jpg",
         created_at=datetime.now().isoformat(),
         size_bytes=stat.st_size,
@@ -248,8 +256,7 @@ async def list_approved():
     # Walk subdirectories (organized by brief_id or flat)
     for f in sorted(APPROVED_DIR.rglob("*.jpg"), key=lambda p: p.stat().st_mtime, reverse=True):
         stat = f.stat()
-        rel_path = f.relative_to(Path("storage"))
-        url = f"http://localhost:8000/storage/{rel_path.as_posix()}"
+        url = _file_to_data_uri(f)
 
         # Try to read caption from sidecar file
         caption_file = f.with_suffix(".txt")
@@ -310,10 +317,9 @@ async def approve_image(image_id: str, body: ApproveImageRequest = ApproveImageR
 
     if source == "approved":
         # Already approved
-        rel_path = file_path.relative_to(Path("storage"))
         return ApproveImageResponse(
             image_id=image_id,
-            approved_url=f"http://localhost:8000/storage/{rel_path.as_posix()}",
+            approved_url=_file_to_data_uri(file_path),
             message="Image was already approved.",
         )
 
@@ -353,8 +359,7 @@ async def approve_image(image_id: str, body: ApproveImageRequest = ApproveImageR
         except Exception:
             pass
 
-    rel_path = approved_path.relative_to(Path("storage"))
-    approved_url = f"http://localhost:8000/storage/{rel_path.as_posix()}"
+    approved_url = _file_to_data_uri(approved_path)
 
     log.info("image_approved", image_id=image_id, scheduled_time=scheduled_time)
 
