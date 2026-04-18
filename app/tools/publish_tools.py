@@ -121,26 +121,35 @@ def post_to_facebook(image_url: str, message: str, page_id: str) -> str:
     access_token = _get_facebook_page_token(user_token, page_id)
 
     try:
-        # Check if this is a local file — upload directly via multipart
-        if image_url.startswith("http://localhost"):
-            local_path = Path(image_url.replace("http://localhost:8000/storage/", "storage/"))
-            if not local_path.exists():
-                log.error("facebook_local_file_missing", path=str(local_path))
+        # Resolve image bytes from data URI or local path
+        def _get_image_bytes(url: str) -> bytes:
+            import base64 as _b64
+            if url.startswith("data:"):
+                _, encoded = url.split(",", 1)
+                return _b64.b64decode(encoded)
+            local_path = Path(url.replace("http://localhost:8000/storage/", "storage/"))
+            if local_path.exists():
+                return local_path.read_bytes()
+            return b""
+
+        if image_url.startswith("data:") or image_url.startswith("http://localhost"):
+            img_bytes = _get_image_bytes(image_url)
+            if not img_bytes:
+                log.error("facebook_image_missing", url=image_url)
                 return "file_not_found"
 
             with httpx.Client(timeout=60.0) as client:
-                with open(local_path, "rb") as img_file:
-                    resp = client.post(
+                resp = client.post(
                         f"https://graph.facebook.com/v18.0/{page_id}/photos",
                         data={
                             "message": message,
                             "access_token": access_token,
                             "published": "true",
                         },
-                        files={"source": (local_path.name, img_file, "image/jpeg")},
+                        files={"source": ("image.jpg", img_bytes, "image/jpeg")},
                     )
-                    resp.raise_for_status()
-                    result = resp.json()
+                resp.raise_for_status()
+                result = resp.json()
         else:
             # Remote URL — use url parameter
             with httpx.Client(timeout=60.0) as client:

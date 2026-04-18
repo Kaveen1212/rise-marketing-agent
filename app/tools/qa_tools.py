@@ -16,8 +16,12 @@ import colorsys
 
 
 def _download_image(image_url: str) -> Image.Image:
-    """Download an image from URL or read from local storage."""
-    if image_url.startswith("http://localhost"):
+    """Download an image from URL, data URI, or local storage."""
+    import base64 as _b64
+    if image_url.startswith("data:"):
+        _, encoded = image_url.split(",", 1)
+        return Image.open(io.BytesIO(_b64.b64decode(encoded))).convert("RGB")
+    elif image_url.startswith("http://localhost"):
         local_path = Path(image_url.replace("http://localhost:8000/storage/", "storage/"))
         if local_path.exists():
             return Image.open(local_path).convert("RGB")

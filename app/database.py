@@ -143,21 +143,51 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 # Database health check
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def check_database_connection() -> bool:
+async def check_database_connection(retries: int = 5, delay: float = 2.0) -> bool:
     """
     Verify the database is reachable.
     Called at application startup — app refuses to start if DB is unreachable.
+
+    Retries up to `retries` times with `delay` seconds between attempts.
+    This handles cloud databases (e.g. Neon) that need a few seconds to
+    wake from auto-suspend on cold start.
     """
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        return True
-    except Exception as exc:  # noqa: BLE001
-        # Log the error but don't expose connection details
-        import structlog
-        log = structlog.get_logger()
-        log.error("database_connection_failed", error=str(exc))
-        return False
+    import asyncio
+    import structlog
+    log = structlog.get_logger()
+
+    for attempt in range(1, retries + 1):
+        try:
+            async def _ping():
+                async with engine.connect() as conn:
+                    await conn.execute(text("SELECT 1"))
+
+            await asyncio.wait_for(_ping(), timeout=10.0)
+            if attempt > 1:
+                log.info("database_connection_restored", attempt=attempt)
+            return True
+        except asyncio.TimeoutError:
+            exc_msg = "connection timed out after 10s (DB may be cold-starting)"
+            log.warning(
+                "database_connection_attempt_failed",
+                attempt=attempt,
+                retries=retries,
+                error=exc_msg,
+            )
+            if attempt < retries:
+                await asyncio.sleep(delay)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "database_connection_attempt_failed",
+                attempt=attempt,
+                retries=retries,
+                error=str(exc),
+            )
+            if attempt < retries:
+                await asyncio.sleep(delay)
+
+    log.error("database_connection_failed_all_retries", retries=retries)
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
