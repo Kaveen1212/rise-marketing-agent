@@ -29,7 +29,7 @@ from pydantic import BaseModel
 log = structlog.get_logger()
 router = APIRouter()
 
-STORAGE_DIR = Path("storage/posters")
+STORAGE_DIR = Path(__file__).parent.parent.parent / "storage" / "posters"
 UPLOADS_DIR = STORAGE_DIR / "uploads"
 APPROVED_DIR = STORAGE_DIR / "approved"
 GENERATED_DIR = STORAGE_DIR / "generated"
@@ -100,6 +100,11 @@ def _file_to_data_uri(path: Path) -> str:
     _mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}
     mime = _mime_map.get(path.suffix.lower(), "image/jpeg")
     return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+
+
+def _validate_image_id(image_id: str) -> None:
+    if "/" in image_id or "\\" in image_id or ".." in image_id:
+        raise HTTPException(status_code=400, detail="Invalid image ID.")
 
 
 def _find_image(image_id: str) -> Optional[tuple[Path, str]]:
@@ -229,6 +234,7 @@ async def list_uploads():
 @router.delete("/images/uploads/{image_id}")
 async def delete_upload(image_id: str):
     """Delete an uploaded image."""
+    _validate_image_id(image_id)
     result = _find_image(image_id)
     if not result:
         raise HTTPException(status_code=404, detail="Image not found.")
@@ -309,6 +315,7 @@ async def approve_image(image_id: str, body: ApproveImageRequest = ApproveImageR
     The image is organized under storage/posters/approved/
     Optional caption and scheduled time are saved as sidecar files.
     """
+    _validate_image_id(image_id)
     result = _find_image(image_id)
     if not result:
         raise HTTPException(status_code=404, detail="Image not found.")
@@ -381,6 +388,7 @@ async def reject_image(image_id: str):
     Reject an image — removes it from storage.
     Uploaded images are not deleted; only AI-generated ones.
     """
+    _validate_image_id(image_id)
     result = _find_image(image_id)
     if not result:
         raise HTTPException(status_code=404, detail="Image not found.")

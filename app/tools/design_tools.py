@@ -3,6 +3,7 @@ import io
 import uuid
 from pathlib import Path
 
+import httpx
 from langchain_core.tools import tool
 from PIL import Image, ImageDraw, ImageFont
 
@@ -94,7 +95,6 @@ def call_stability_ai(prompt: str, negative_prompt: str, width: int, height: int
     Falls back to a branded placeholder if the API call fails.
     Returns the local URL of the generated image.
     """
-    import httpx, base64
     from app.config import settings
 
     image_id = uuid.uuid4().hex[:12]
@@ -149,13 +149,12 @@ def call_stability_ai(prompt: str, negative_prompt: str, width: int, height: int
 
 
 @tool
-def call_dalle3(prompt: str) -> str:
+def call_stability_creative(prompt: str) -> str:
     """
-    Fallback image generation using Stability AI with a different style preset.
+    Fallback image generation using Stability AI with a digital-art style preset.
     Falls back to placeholder if API fails.
     Returns the local URL of the generated image.
     """
-    import httpx, base64
     from app.config import settings
 
     image_id = uuid.uuid4().hex[:12]
@@ -214,7 +213,6 @@ def resize_for_platform(image_url: str, platform: str) -> str:
             local_path = Path(image_url.replace("http://localhost:8000/storage/", "storage/"))
             image_bytes = local_path.read_bytes()
         else:
-            import httpx
             resp = httpx.get(image_url, timeout=30.0)
             resp.raise_for_status()
             image_bytes = resp.content
